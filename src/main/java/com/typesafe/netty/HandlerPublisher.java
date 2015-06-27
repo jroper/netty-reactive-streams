@@ -134,7 +134,11 @@ public class HandlerPublisher<T> extends ChannelDuplexHandler implements Publish
                         subscriber.onSubscribe(new ChannelSubscription());
                         switch (state) {
                             case NO_SUBSCRIBER:
-                                state = IDLE;
+                                if (buffer.isEmpty()) {
+                                    state = IDLE;
+                                } else {
+                                    state = BUFFERING;
+                                }
                                 break;
                             case NO_SUBSCRIBER_ERROR:
                                 state = DONE;
@@ -334,6 +338,7 @@ public class HandlerPublisher<T> extends ChannelDuplexHandler implements Publish
             case BUFFERING:
                 bufferSubscriberEvent(PublisherMessageHandler.Complete.<T>instance());
                 messageHandler.cancel(ctx);
+                state = DRAINING;
                 break;
             case DEMANDING:
             case IDLE:
