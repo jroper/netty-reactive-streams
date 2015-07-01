@@ -12,14 +12,45 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static com.typesafe.netty.HandlerSubscriber.State.*;
 
+import static com.typesafe.netty.LoggingHelper.*;
+
 /**
  * Subscriber that publishes received messages to the handler pipeline.
  */
 public class HandlerSubscriber<T> extends ChannelDuplexHandler implements Subscriber<T> {
 
+    public static final long DEFAULT_LOW_WATERMARK = 4;
+    public static final long DEFAULT_HIGH_WATERMARK = 16;
+
+    /**
+     * Create a new handler subscriber.
+     *
+     * @param demandLowWatermark The low watermark for demand. When demand drops below this, more will be requested.
+     * @param demandHighWatermark The high watermark for demand. This is the maximum that will be requested.
+     */
     public HandlerSubscriber(long demandLowWatermark, long demandHighWatermark) {
         this.demandLowWatermark = demandLowWatermark;
         this.demandHighWatermark = demandHighWatermark;
+    }
+
+    public HandlerSubscriber() {
+        this(DEFAULT_LOW_WATERMARK, DEFAULT_HIGH_WATERMARK);
+    }
+
+    /**
+     * Override for custom error handling. By default, it closes the channel.
+     */
+    protected void error(Throwable error) {
+        doClose();
+    }
+
+    /**
+     * Override for custom completion handling. By default, it closes the channel.
+     */
+    protected void complete() {
+        logOut(ctx, "SUB complete");
+
+        doClose();
     }
 
     private final long demandLowWatermark;
@@ -45,7 +76,6 @@ public class HandlerSubscriber<T> extends ChannelDuplexHandler implements Subscr
 
     @Override
     public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
-
         this.ctx = ctx;
         if (subscriptionContextState.compareAndSet(NO_SUBSCRIPTION_OR_CONTEXT, NO_SUBSCRIPTION)) {
             // We were in no subscription or context, now we just don't have a subscription.
@@ -55,20 +85,23 @@ public class HandlerSubscriber<T> extends ChannelDuplexHandler implements Subscr
             state = RUNNING;
             maybeRequestMore();
         } else {
-            // We are complete, disconnect
+            // We are complete, close
             state = COMPLETE;
-            ctx.disconnect();
+            ctx.close();
         }
     }
 
     @Override
     public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception {
+        logOut(ctx, "SUB writability changed");
         maybeRequestMore();
+        ctx.fireChannelWritabilityChanged();
     }
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         cancel();
+        ctx.fireChannelInactive();
     }
 
     @Override
@@ -130,12 +163,14 @@ public class HandlerSubscriber<T> extends ChannelDuplexHandler implements Subscr
 
     @Override
     public void onNext(T t) {
+        logOut(ctx, "SUB onNext");
         // Publish straight to the context.
         // TODO determine if this can ever throw an exception, eg if the channel is closed, or if the handler is removed
         // from the pipeline
         ctx.writeAndFlush(t).addListener(new ChannelFutureListener() {
             @Override
             public void operationComplete(ChannelFuture future) throws Exception {
+                logOut(ctx, "SUB onNext complete");
                 outstandingDemand--;
                 maybeRequestMore();
             }
@@ -147,7 +182,7 @@ public class HandlerSubscriber<T> extends ChannelDuplexHandler implements Subscr
         if (error == null) {
             throw new NullPointerException("Null error published");
         }
-        complete();
+        error(error);
     }
 
     @Override
@@ -155,18 +190,20 @@ public class HandlerSubscriber<T> extends ChannelDuplexHandler implements Subscr
         complete();
     }
 
-    private void complete() {
+    private void doClose() {
         // First try the no context path
         if (!subscriptionContextState.compareAndSet(NO_CONTEXT, COMPLETE)) {
-            // We must have a context, so disconnect it
-            ctx.disconnect();
+            // We must have a context, so close it
+            ctx.close();
         }
     }
 
     private void maybeRequestMore() {
         if (outstandingDemand <= demandLowWatermark && ctx.channel().isWritable()) {
-            subscription.request(demandHighWatermark - outstandingDemand);
+            long toRequest = demandHighWatermark - outstandingDemand;
+            logOut(ctx, "SUB requesting " + toRequest);
             outstandingDemand = demandHighWatermark;
+            subscription.request(toRequest);
         }
     }
 }
